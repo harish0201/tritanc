@@ -50,19 +50,24 @@ import argparse
 import logging
 import subprocess
 from collections import defaultdict
+from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
 import networkx as nx
 from Bio import SeqIO
-from scipy.stats import spearmanr
+from scipy.stats import spearmanr, rankdata
+from scipy.stats import t as t_dist
 from statsmodels.stats.multitest import multipletests
 
 # ── Defaults ───────────────────────────────────────────────────────────────────
 MIN_LEN       = 5000   # bp
-ANI_THRESHOLD = 95.0   # %
-COV_THRESHOLD = 0.90   # Spearman r
-COV_PVAL      = 0.05   # BH-FDR adjusted p-value
+# ANI_THRESHOLD, COV_THRESHOLD, COV_PVAL are now computed adaptively
+# via AdaptiveThresholds based on sample count. See get_adaptive_thresholds().
+# These module-level values are used as CLI defaults only.
+ANI_THRESHOLD = 95.0   # % (CLI default — overridden at runtime)
+COV_THRESHOLD = 0.90   # Spearman r (CLI default — overridden at runtime)
+COV_PVAL      = 0.05   # p-value cutoff (CLI default — overridden at runtime)
 
 NOISE_TAXA = {"", "root", "cellular organisms", "unclassified", "N/A"}
 
@@ -101,6 +106,138 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Adaptive thresholds
+# ══════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class AdaptiveThresholds:
+    """
+    All clustering thresholds derived from sample count in one place.
+
+    Significance strategy by sample count:
+      n >= 30  Analytical t-approximation + BH-FDR correction.
+               t-approximation is reliable at this n; FDR controls false
+               edges across the many pairs tested.
+      20 <= n < 30
+               Permutation testing (B=999).
+               t-approximation becomes unreliable; permutation is exact
+               under H0 regardless of n. BH-FDR applied to permutation
+               p-values.
+      10 <= n < 20
+               Permutation testing (B=9999) with relaxed alpha.
+               More permutations to get stable p-values at low n.
+               BH-FDR disabled — overcorrects when power is low;
+               raw permutation p with relaxed cutoff (0.10) used instead.
+      n < 10   Coverage correlation disabled in recovery (None threshold).
+               At this n, Spearman r is essentially noise. ANI + taxonomy
+               drive everything; coverage acts only as a soft tiebreaker
+               in main/secondary clustering with a very loose threshold.
+    """
+    n_samples:              int
+    ani_main:               float   # ANI threshold for main clustering
+    ani_secondary:          float   # ANI threshold for secondary clustering
+    ani_recovery:           float   # ANI threshold for recovery
+    cov_main:               float   # Spearman r for main clustering
+    cov_secondary:          float   # Spearman r for secondary clustering
+    cov_recovery:           float | None   # None = disable coverage in recovery
+    cov_pval:               float   # p-value cutoff
+    use_fdr:                bool    # apply BH-FDR correction
+    use_permutation:        bool    # use permutation testing instead of t-approx
+    n_permutations:         int     # number of permutations (0 = analytical)
+    coverage_is_hard_gate:  bool    # False = coverage is tiebreaker only
+
+
+def get_adaptive_thresholds(n_samples: int,
+                             ani_override: float | None = None) -> AdaptiveThresholds:
+    """
+    Compute AdaptiveThresholds from sample count.
+
+    ani_override: if supplied (from --ani-threshold CLI flag), overrides
+                  the adaptive ANI values. Useful when the user wants to
+                  explicitly control ANI regardless of sample count.
+    """
+    if n_samples >= 30:
+        ani_main = ani_secondary = ani_recovery = 95.0
+        cov_main, cov_secondary, cov_recovery   = 0.90, 0.82, 0.75
+        cov_pval               = 0.05
+        use_fdr                = True
+        use_permutation        = False
+        n_permutations         = 0
+        coverage_is_hard_gate  = True
+        log.info(
+            f"Sample count n={n_samples} (>=30): "
+            f"analytical t-approximation + BH-FDR | "
+            f"ANI={ani_main}% | r thresholds main={cov_main} secondary={cov_secondary} recovery={cov_recovery}"
+        )
+
+    elif n_samples >= 20:
+        ani_main = ani_secondary = ani_recovery = 95.0
+        cov_main, cov_secondary, cov_recovery   = 0.85, 0.78, 0.70
+        cov_pval               = 0.05
+        use_fdr                = True
+        use_permutation        = True
+        n_permutations         = 999
+        coverage_is_hard_gate  = True
+        log.info(
+            f"Sample count n={n_samples} (20-29): "
+            f"permutation testing (B={n_permutations}) + BH-FDR | "
+            f"ANI={ani_main}% | r thresholds main={cov_main} secondary={cov_secondary} recovery={cov_recovery}"
+        )
+
+    elif n_samples >= 10:
+        ani_main      = 96.0
+        ani_secondary = 96.0
+        ani_recovery  = 96.0
+        cov_main, cov_secondary, cov_recovery = 0.75, 0.65, 0.60
+        cov_pval               = 0.10   # relaxed; BH disabled
+        use_fdr                = False
+        use_permutation        = True
+        n_permutations         = 9999   # more permutations for stability at low n
+        coverage_is_hard_gate  = True
+        log.info(
+            f"Sample count n={n_samples} (10-19): "
+            f"permutation testing (B={n_permutations}), BH-FDR disabled (raw p<{cov_pval}) | "
+            f"ANI raised to {ani_main}% | r thresholds main={cov_main} secondary={cov_secondary} recovery={cov_recovery}"
+        )
+
+    else:  # n < 10
+        ani_main      = 97.0
+        ani_secondary = 97.0
+        ani_recovery  = 97.0
+        cov_main, cov_secondary = 0.60, 0.50
+        cov_recovery            = None   # disabled in recovery
+        cov_pval                = 0.10
+        use_fdr                 = False
+        use_permutation         = False
+        n_permutations          = 0
+        coverage_is_hard_gate   = False  # coverage is tiebreaker only
+        log.warning(
+            f"Only {n_samples} samples — coverage correlation has very low power. "
+            f"Clustering relies primarily on ANI (raised to {ani_main}%) + taxonomy. "
+            f"Coverage used as soft tiebreaker only."
+        )
+
+    if ani_override is not None:
+        ani_main = ani_secondary = ani_recovery = ani_override
+        log.info(f"  ANI threshold overridden by --ani-threshold: {ani_override}%")
+
+    return AdaptiveThresholds(
+        n_samples             = n_samples,
+        ani_main              = ani_main,
+        ani_secondary         = ani_secondary,
+        ani_recovery          = ani_recovery,
+        cov_main              = cov_main,
+        cov_secondary         = cov_secondary,
+        cov_recovery          = cov_recovery,
+        cov_pval              = cov_pval,
+        use_fdr               = use_fdr,
+        use_permutation       = use_permutation,
+        n_permutations        = n_permutations,
+        coverage_is_hard_gate = coverage_is_hard_gate,
+    )
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 1. Tool checks
@@ -536,44 +673,154 @@ def get_genus_name(contig, tax_df):
 # 5. Main clustering
 # ══════════════════════════════════════════════════════════════════════════════
 
-def build_main_clusters(contigs_main, tax_df, ani_df, depth_df):
+
+def _compute_rho(q_ranked: np.ndarray, r_ranked: np.ndarray) -> np.ndarray:
+    """
+    Pearson correlation on pre-ranked rows = Spearman r.
+    q_ranked, r_ranked: (n_pairs, n_samples)
+    Returns rho: (n_pairs,)
+    """
+    q_c   = q_ranked - q_ranked.mean(axis=1, keepdims=True)
+    r_c   = r_ranked - r_ranked.mean(axis=1, keepdims=True)
+    num   = (q_c * r_c).sum(axis=1)
+    denom = np.linalg.norm(q_c, axis=1) * np.linalg.norm(r_c, axis=1)
+    return np.where(denom > 0, num / denom, 0.0)
+
+
+def _analytical_pvalues(rho: np.ndarray, n_samples: int) -> np.ndarray:
+    """t-approximation p-values. Valid for n_samples >= 30."""
+    t_stat = rho * np.sqrt((n_samples - 2) / np.maximum(1.0 - rho**2, 1e-12))
+    return 2 * t_dist.sf(np.abs(t_stat), df=n_samples - 2)
+
+
+def _permutation_pvalues(rho_obs: np.ndarray,
+                          q_ranked: np.ndarray,
+                          r_ranked: np.ndarray,
+                          n_permutations: int,
+                          rng: np.random.Generator) -> np.ndarray:
+    """
+    Permutation p-values for Spearman r.
+
+    Strategy: shuffle the sample order of q_ranked once per permutation
+    and recompute rho for all pairs in a single vectorised pass.
+    This gives an exact p-value under H0 (independence) without any
+    distributional assumption.
+
+    p_i = (number of permutations where |rho_perm_i| >= |rho_obs_i|) / B
+    """
+    n_pairs   = q_ranked.shape[0]
+    n_samples = q_ranked.shape[1]
+    exceed    = np.zeros(n_pairs, dtype=np.int32)
+
+    abs_obs = np.abs(rho_obs)
+    log.info(f"    Running {n_permutations:,} permutations over {n_pairs:,} pairs "
+             f"({n_samples} samples)...")
+
+    for _ in range(n_permutations):
+        perm         = rng.permutation(n_samples)
+        q_perm       = q_ranked[:, perm]          # shuffle sample order
+        rho_perm     = _compute_rho(q_perm, r_ranked)
+        exceed      += (np.abs(rho_perm) >= abs_obs).astype(np.int32)
+
+    # +1 in numerator and denominator: count observed value as one permutation
+    return (exceed + 1) / (n_permutations + 1)
+
+
+def vectorised_spearman_pairs(candidates: pd.DataFrame,
+                               depth_df: pd.DataFrame,
+                               thresholds: "AdaptiveThresholds") -> pd.DataFrame:
+    """
+    Compute Spearman r and p-value for every (query, ref) row in `candidates`.
+
+    Significance method is determined by thresholds.use_permutation:
+      False  Analytical t-approximation (valid for n >= 30).
+      True   Permutation testing (B = thresholds.n_permutations).
+             Exact under H0; no distributional assumption.
+             Used for n < 30 where t-approximation breaks down.
+
+    Returns candidates with new columns: cov_r, pval.
+    Rows where either contig is missing from depth_df are dropped.
+    """
+    all_ctgs        = list(set(candidates["query"]) | set(candidates["ref"]))
+    ctgs_with_depth = [c for c in all_ctgs if c in depth_df.index]
+    if not ctgs_with_depth:
+        candidates["cov_r"] = np.nan
+        candidates["pval"]  = 1.0
+        return candidates
+
+    depth_mat  = depth_df.loc[ctgs_with_depth].values.astype(np.float64)
+    ranked_mat = rankdata(depth_mat, axis=1)          # (n_contigs, n_samples)
+    ctg_idx    = {c: i for i, c in enumerate(ctgs_with_depth)}
+    n_samples  = ranked_mat.shape[1]
+
+    q_idx = candidates["query"].map(ctg_idx)
+    r_idx = candidates["ref"].map(ctg_idx)
+    valid = q_idx.notna() & r_idx.notna()
+
+    candidates = candidates[valid].copy()
+    q_idx = q_idx[valid].astype(int).values
+    r_idx = r_idx[valid].astype(int).values
+
+    q_ranked = ranked_mat[q_idx]                      # (n_pairs, n_samples)
+    r_ranked = ranked_mat[r_idx]
+
+    rho = _compute_rho(q_ranked, r_ranked)
+
+    if thresholds.use_permutation:
+        rng   = np.random.default_rng(seed=42)
+        pvals = _permutation_pvalues(
+            rho, q_ranked, r_ranked, thresholds.n_permutations, rng
+        )
+    else:
+        pvals = _analytical_pvalues(rho, n_samples)
+
+    candidates["cov_r"] = rho
+    candidates["pval"]  = pvals
+    return candidates
+
+def build_main_clusters(contigs_main, tax_df, ani_df, depth_df, thresholds):
     log.info("Building main clusters...")
     main_set = set(contigs_main)
 
     candidates = ani_df[
-        (ani_df["ani"] >= ANI_THRESHOLD) &
+        (ani_df["ani"] >= thresholds.ani_main) &
         (ani_df["query"].isin(main_set)) &
         (ani_df["ref"].isin(main_set))
     ].copy()
 
     genus_map = {c: get_genus_name(c, tax_df) for c in contigs_main if c in tax_df.index}
+    # Bottleneck 4 fix: vectorised map + comparison instead of row-wise lambda
+    candidates["_qg"] = candidates["query"].map(genus_map)
+    candidates["_rg"] = candidates["ref"].map(genus_map)
     candidates = candidates[
-        candidates.apply(
-            lambda r: genus_map.get(r["query"]) == genus_map.get(r["ref"]), axis=1
-        )
-    ].copy()
+        candidates["_qg"].notna() &
+        candidates["_rg"].notna() &
+        (candidates["_qg"] == candidates["_rg"])
+    ].drop(columns=["_qg", "_rg"]).copy()
     log.info(f"  {len(candidates):,} within-genus ANI pairs above threshold")
 
     G = nx.Graph()
     G.add_nodes_from(contigs_main)
 
     if not candidates.empty:
-        cov_r_list, pval_list = [], []
-        for _, row in candidates.iterrows():
-            r, p = coverage_corr(row["query"], row["ref"], depth_df)
-            cov_r_list.append(r if r is not None else np.nan)
-            pval_list.append(p if p is not None else 1.0)
-
-        candidates = candidates.copy()
-        candidates["cov_r"]    = cov_r_list
-        candidates["pval"]     = pval_list
-        _, adj_pvals, _, _     = multipletests(pval_list, method="fdr_bh")
+        # Bottleneck 1 fix: single vectorised Spearman pass over all pairs
+        candidates = vectorised_spearman_pairs(candidates, depth_df, thresholds)
+        if thresholds.use_fdr:
+            _, adj_pvals, _, _ = multipletests(
+                candidates["pval"].fillna(1.0), method="fdr_bh"
+            )
+        else:
+            adj_pvals = candidates["pval"].fillna(1.0).values
         candidates["pval_adj"] = adj_pvals
 
-        passing = candidates[
-            (candidates["cov_r"] >= COV_THRESHOLD) &
-            (candidates["pval_adj"] < COV_PVAL)
-        ]
+        if not thresholds.coverage_is_hard_gate:
+            # n < 15: coverage is tiebreaker only — pass all ANI pairs
+            passing = candidates.copy()
+        else:
+            passing = candidates[
+                (candidates["cov_r"] >= thresholds.cov_main) &
+                (candidates["pval_adj"] < thresholds.cov_pval)
+            ]
         log.info(f"  {len(passing):,} pairs pass coverage correlation filter")
         for _, row in passing.iterrows():
             G.add_edge(row["query"], row["ref"])
@@ -605,7 +852,7 @@ def get_coarse_taxon(contig, tax_df):
 
 
 def build_secondary_clusters(contigs_secondary, clusters, membership,
-                              tax_df, ani_df, depth_df, cluster_id_offset):
+                              tax_df, ani_df, depth_df, cluster_id_offset, thresholds):
     """
     Second-pass clustering for long contigs assigned above genus level
     (order, family, class, phylum).
@@ -640,7 +887,7 @@ def build_secondary_clusters(contigs_secondary, clusters, membership,
 
         member_set = set(members)
         candidates = ani_df[
-            (ani_df["ani"] >= ANI_THRESHOLD) &
+            (ani_df["ani"] >= thresholds.ani_secondary) &
             (ani_df["query"].isin(member_set)) &
             (ani_df["ref"].isin(member_set))
         ].copy()
@@ -648,9 +895,16 @@ def build_secondary_clusters(contigs_secondary, clusters, membership,
         G = nx.Graph()
         G.add_nodes_from(members)
 
-        for _, row in candidates.iterrows():
-            r, p = coverage_corr(row["query"], row["ref"], depth_df)
-            if r is not None and r >= COV_THRESHOLD and p < 0.05:
+        if not candidates.empty:
+            candidates = vectorised_spearman_pairs(candidates, depth_df, thresholds)
+            if not thresholds.coverage_is_hard_gate:
+                passing = candidates.copy()
+            else:
+                passing = candidates[
+                    (candidates["cov_r"] >= thresholds.cov_secondary) &
+                    (candidates["pval"] < thresholds.cov_pval)
+                ]
+            for _, row in passing.iterrows():
                 G.add_edge(row["query"], row["ref"])
 
         for component in nx.connected_components(G):
@@ -677,19 +931,30 @@ def build_secondary_clusters(contigs_secondary, clusters, membership,
 # 6. Recovery module
 # ══════════════════════════════════════════════════════════════════════════════
 
+# Maximum taxonomy-based candidates per contig.
+# Prevents pathologically large candidate sets for contigs assigned to
+# common high-level taxa (e.g. Bacillota) where thousands of clusters
+# share the same ancestor. ANI candidates are always kept regardless.
+MAX_TAX_CANDIDATES = 50
+
+
 def recover_contigs(contigs_recover, clusters, membership, cluster_reps,
-                    tax_df, ani_df, depth_df, absent_from_taxonomy: set):
+                    tax_df, ani_df, depth_df, absent_from_taxonomy: set,
+                    thresholds: "AdaptiveThresholds"):
     """
     Assign short / above-genus / unclassified contigs to existing clusters.
 
-    Speed optimisations vs naive implementation:
-      1. Inverted taxonomy index: taxon_name -> [cluster_ids]
-         O(1) lookup per taxon name instead of iterating all clusters per contig.
-      2. Coverage correlation vectorised over all candidates at once using numpy
-         instead of calling scipy spearmanr per pair.
-      3. ANI candidates short-circuit: if a contig has an ANI hit, skip taxonomy
-         lookup (ANI is a stronger signal; avoids iterating the taxon index).
-      4. Pre-extract depth matrix as numpy array for fast row access.
+    Speed design:
+      - ANI candidates: vectorised pandas lookup, always used.
+        ANI is the strongest signal; if a hit exists we skip taxonomy entirely.
+      - Taxonomy candidates: inverted index keyed on the contig's LEAF taxon
+        only (not full lineage walk). This avoids mapping phylum-level contigs
+        to every cluster in that phylum. Capped at MAX_TAX_CANDIDATES.
+      - Coverage: pre-ranked rep depth matrix; Spearman r computed in one
+        numpy matrix multiply over all candidates at once.
+      - Contigs with no candidates (no ANI hit, no taxonomy match) are
+        short-circuited immediately — no coverage work done.
+      - Progress logged every 50k contigs.
     """
     log.info(f"Recovery module: {len(contigs_recover):,} contigs...")
 
@@ -697,115 +962,123 @@ def recover_contigs(contigs_recover, clusters, membership, cluster_reps,
     rep_set        = set(cluster_reps.values())
     recover_set    = set(contigs_recover)
 
-    # ── ANI index: recovery contig -> [cluster_ids with ANI hit to rep] ───────
-    ani_hits = defaultdict(list)
+    # ── ANI index (vectorised) ────────────────────────────────────────────────
     ani_rec = ani_df[
-        (ani_df["ani"] >= ANI_THRESHOLD) &
+        (ani_df["ani"] >= thresholds.ani_recovery) &
         (
             (ani_df["query"].isin(recover_set) & ani_df["ref"].isin(rep_set)) |
             (ani_df["ref"].isin(recover_set)   & ani_df["query"].isin(rep_set))
         )
-    ]
-    for _, row in ani_rec.iterrows():
-        contig = row["query"] if row["query"] in recover_set else row["ref"]
-        rep    = row["ref"]   if row["query"] in recover_set else row["query"]
-        if rep in rep_to_cluster:
-            ani_hits[contig].append(rep_to_cluster[rep])
+    ].copy()
+    q_is_recover = ani_rec["query"].isin(recover_set)
+    df_a = ani_rec[ q_is_recover][["query", "ref"]].rename(columns={"query": "contig", "ref": "rep"})
+    df_b = ani_rec[~q_is_recover][["ref", "query"]].rename(columns={"ref": "contig", "query": "rep"})
+    hits = pd.concat([df_a, df_b], ignore_index=True)
+    hits = hits[hits["rep"].isin(rep_to_cluster)].copy()
+    hits["cid"] = hits["rep"].map(rep_to_cluster)
+    ani_hits = hits.groupby("contig")["cid"].apply(list).to_dict()
+    log.info(f"  ANI hits: {len(ani_hits):,} contigs have at least one hit")
 
-    # ── Inverted taxonomy index: taxon_name -> [cluster_ids] ─────────────────
-    # Build once; each contig lookup is then O(len(contig_lineage)) dict lookups
-    # instead of O(n_clusters) set intersections.
-    taxon_to_clusters = defaultdict(list)
+    # ── Taxonomy index keyed on LEAF taxon name only ──────────────────────────
+    # Using only the deepest assigned name (e.g. "Streptococcus" not the full
+    # lineage) avoids mapping every Firmicutes contig to every Firmicutes cluster.
+    leaf_taxon_to_clusters: dict[str, list] = defaultdict(list)
     for cid, rep in cluster_reps.items():
         if rep in tax_df.index:
-            for taxon in lineage_set(tax_df.loc[rep]):
-                taxon_to_clusters[taxon].append(cid)
+            name = tax_df.loc[rep, "name"]
+            if name not in NOISE_TAXA:
+                leaf_taxon_to_clusters[name].append(cid)
+    log.info(f"  Taxonomy index: {len(leaf_taxon_to_clusters):,} unique leaf taxa")
 
-    # ── Pre-extract depth matrix as numpy for fast vectorised correlation ─────
-    # Build ordered list of rep contigs that exist in depth_df
-    rep_list    = [rep for rep in cluster_reps.values() if rep in depth_df.index]
-    cid_list    = [rep_to_cluster[rep] for rep in rep_list]
-    rep_depth   = depth_df.loc[rep_list].values.astype(np.float64)  # (n_reps, n_samples)
-    rep_idx     = {rep: i for i, rep in enumerate(rep_list)}
+    # ── Pre-rank all rep depth vectors once ───────────────────────────────────
+    rep_list  = [rep for rep in cluster_reps.values() if rep in depth_df.index]
+    rep_depth = depth_df.loc[rep_list].values.astype(np.float64)
+    rep_ranked = rankdata(rep_depth, axis=1)                   # (n_reps, n_samples)
+    rep_idx   = {rep: i for i, rep in enumerate(rep_list)}
 
-    def spearman_vectorised(contig_vec, candidate_cids):
-        """
-        Compute Spearman r between contig_vec and all candidate rep vectors
-        at once. Returns dict of cid -> r.
-        """
-        # Gather indices of candidate reps that are in depth_df
+    def correlate_candidates(contig_vec: np.ndarray,
+                              candidate_cids: set) -> dict:
+        """Spearman r between contig_vec and all candidate reps in one pass."""
         idxs, valid_cids = [], []
         for cid in candidate_cids:
             rep = cluster_reps[cid]
-            if rep in rep_idx:
-                idxs.append(rep_idx[rep])
+            i   = rep_idx.get(rep)
+            if i is not None:
+                idxs.append(i)
                 valid_cids.append(cid)
         if not idxs:
             return {}
 
-        mat = rep_depth[idxs]               # (n_candidates, n_samples)
-        n   = mat.shape[1]
+        contig_ranked = rankdata(contig_vec)                   # (n_samples,)
+        mat_ranked    = rep_ranked[idxs]                       # (n_cands, n_samples)
 
-        # Rank both the contig vector and all rep rows simultaneously
-        def rankdata_2d(x):
-            # x shape: (k, n) — rank each row
-            ranked = np.zeros_like(x, dtype=np.float64)
-            for i in range(x.shape[0]):
-                ranked[i] = np.argsort(np.argsort(x[i])).astype(np.float64)
-            return ranked
-
-        contig_ranked = np.argsort(np.argsort(contig_vec)).astype(np.float64)
-        mat_ranked    = rankdata_2d(mat)
-
-        # Pearson on ranks = Spearman
-        c_mean  = contig_ranked.mean()
-        m_means = mat_ranked.mean(axis=1, keepdims=True)
-        c_dev   = contig_ranked - c_mean
-        m_dev   = mat_ranked - m_means
-
-        num     = (m_dev * c_dev).sum(axis=1)
-        denom   = np.sqrt((m_dev**2).sum(axis=1)) * np.sqrt((c_dev**2).sum())
+        c_dev = contig_ranked - contig_ranked.mean()
+        m_dev = mat_ranked - mat_ranked.mean(axis=1, keepdims=True)
+        num   = (m_dev * c_dev).sum(axis=1)
+        denom = (np.sqrt((m_dev**2).sum(axis=1)) *
+                 np.sqrt((c_dev**2).sum()))
         with np.errstate(invalid="ignore", divide="ignore"):
             r_vals = np.where(denom > 0, num / denom, 0.0)
 
-        return {cid: float(r) for cid, r in zip(valid_cids, r_vals)}
+        return dict(zip(valid_cids, r_vals.tolist()))
 
     # ── Main recovery loop ────────────────────────────────────────────────────
     recovered_ani_only  = []
     recovered_tax_aided = []
     recovered_ani_tax   = []
     unassigned          = []
+    cov_thresh          = thresholds.cov_recovery
 
-    for contig in contigs_recover:
-        # ANI candidates
+    n_no_candidates   = 0
+    n_no_depth        = 0
+    log_every         = 50_000
+
+    for i, contig in enumerate(contigs_recover):
+        if i % log_every == 0 and i > 0:
+            done = i
+            pct  = 100 * done / len(contigs_recover)
+            log.info(f"  Recovery progress: {done:,}/{len(contigs_recover):,} "
+                     f"({pct:.1f}%) — recovered so far: "
+                     f"{len(recovered_ani_only)+len(recovered_tax_aided)+len(recovered_ani_tax):,}")
+
+        # ── ANI candidates (always checked first) ─────────────────────────────
         ani_candidates = set(ani_hits.get(contig, []))
 
-        # Taxonomy candidates — only if no ANI hit (ANI is stronger signal)
-        tax_candidates = set()
+        # ── Taxonomy candidates (leaf taxon only, capped) ─────────────────────
+        # Only used if no ANI hit — ANI is a stronger signal
+        tax_candidates: set = set()
         if not ani_candidates and contig in tax_df.index:
-            contig_lset = lineage_set(tax_df.loc[contig])
-            for taxon in contig_lset:
-                for cid in taxon_to_clusters.get(taxon, []):
-                    tax_candidates.add(cid)
+            leaf = tax_df.loc[contig, "name"]
+            if leaf not in NOISE_TAXA:
+                matches = leaf_taxon_to_clusters.get(leaf, [])
+                # Cap to avoid pathologically large candidate sets
+                if len(matches) > MAX_TAX_CANDIDATES:
+                    matches = matches[:MAX_TAX_CANDIDATES]
+                tax_candidates = set(matches)
 
         candidate_clusters = ani_candidates | tax_candidates
         if not candidate_clusters:
+            n_no_candidates += 1
             unassigned.append(contig)
             continue
 
-        # Vectorised coverage correlation over all candidates
         if contig not in depth_df.index:
+            n_no_depth += 1
             unassigned.append(contig)
             continue
 
+        # ── Coverage correlation ──────────────────────────────────────────────
         contig_vec = depth_df.loc[contig].values.astype(np.float64)
-        r_map      = spearman_vectorised(contig_vec, candidate_clusters)
+        r_map      = correlate_candidates(contig_vec, candidate_clusters)
 
-        best_cluster = max(
-            (cid for cid, r in r_map.items() if r >= COV_THRESHOLD),
-            key=lambda cid: r_map[cid],
-            default=None,
-        )
+        if cov_thresh is None:
+            best_cluster = max(r_map, key=lambda c: r_map[c], default=None)
+        else:
+            best_cluster = max(
+                (c for c, r in r_map.items() if r >= cov_thresh),
+                key=lambda c: r_map[c],
+                default=None,
+            )
 
         if best_cluster is not None:
             clusters[best_cluster].add(contig)
@@ -819,18 +1092,22 @@ def recover_contigs(contigs_recover, clusters, membership, cluster_reps,
         else:
             unassigned.append(contig)
 
-    total_recovered = len(recovered_ani_only) + len(recovered_tax_aided) + len(recovered_ani_tax)
+    total_recovered = (len(recovered_ani_only) + len(recovered_tax_aided)
+                       + len(recovered_ani_tax))
     log.info(f"  -> Recovered {total_recovered:,} contigs:")
     log.info(f"       ANI-only path:            {len(recovered_ani_only):,}")
     log.info(f"       Taxonomy-only path:        {len(recovered_tax_aided):,}")
     log.info(f"       Both paths available:      {len(recovered_ani_tax):,}")
     log.info(f"  -> Unassigned:                 {len(unassigned):,}")
+    log.info(f"       No candidates at all:      {n_no_candidates:,}")
+    log.info(f"       Missing from depth matrix: {n_no_depth:,}")
 
     unassigned_absent_tax = [c for c in unassigned if c in absent_from_taxonomy]
-    log.info(f"       Of unassigned:")
-    log.info(f"         No taxonomy + no ANI hit: {len(unassigned_absent_tax):,}")
-    log.info(f"         Had taxonomy, no ANI hit: {len([c for c in unassigned if c not in absent_from_taxonomy and not ani_hits.get(c)]):,}")
-    log.info(f"         Had ANI hit(s), cov fail: {len([c for c in unassigned if ani_hits.get(c)]):,}")
+    log.info(f"       No taxonomy + no ANI hit:  {len(unassigned_absent_tax):,}")
+    log.info(f"       Had taxonomy, no ANI hit:  "
+             f"{len([c for c in unassigned if c not in absent_from_taxonomy and not ani_hits.get(c)]):,}")
+    log.info(f"       Had ANI hit(s), cov fail:  "
+             f"{len([c for c in unassigned if ani_hits.get(c)]):,}")
 
     return clusters, membership, unassigned
 
@@ -1236,10 +1513,8 @@ def main():
 
     os.makedirs(args.outdir, exist_ok=True)
 
-    # Override globals
-    MIN_LEN       = args.min_len
-    ANI_THRESHOLD = args.ani_threshold
-    COV_THRESHOLD = args.cov_threshold
+    global MIN_LEN
+    MIN_LEN = args.min_len
 
     # ── Tool availability check ───────────────────────────────────────────────
     needed = tools_needed_for(args)
@@ -1307,6 +1582,13 @@ def main():
 
     absent_set = set(absent_from_taxonomy)
 
+    # ── Adaptive thresholds (computed from sample count) ─────────────────────
+    n_samples  = depth_df.shape[1]
+    thresholds = get_adaptive_thresholds(
+        n_samples  = n_samples,
+        ani_override = args.ani_threshold if args.ani_threshold != ANI_THRESHOLD else None,
+    )
+
     # ── Partition into three tiers ────────────────────────────────────────────
     # Tier 1 (main):      long (>= MIN_LEN) + genus or species assigned
     # Tier 2 (secondary): long (>= MIN_LEN) + above-genus assigned (order/family/class/phylum)
@@ -1340,7 +1622,7 @@ def main():
         log.info(f"  Loaded {len(clusters):,} clusters from checkpoint")
     else:
         # Tier 1: Main clustering
-        clusters, membership = build_main_clusters(contigs_main, tax_df, ani_df, depth_df)
+        clusters, membership = build_main_clusters(contigs_main, tax_df, ani_df, depth_df, thresholds)
         cluster_id_offset = len(clusters)
         cluster_reps = {
             cid: representative(members, records, depth_df)
@@ -1350,7 +1632,7 @@ def main():
         # Tier 2: Secondary clustering (above-genus)
         clusters, membership, contigs_recover_extra, cluster_id_offset = build_secondary_clusters(
             contigs_secondary, clusters, membership,
-            tax_df, ani_df, depth_df, cluster_id_offset
+            tax_df, ani_df, depth_df, cluster_id_offset, thresholds
         )
         contigs_recover = contigs_recover + contigs_recover_extra
         cluster_reps = {
@@ -1361,7 +1643,7 @@ def main():
         # Tier 3: Recovery
         clusters, membership, unassigned = recover_contigs(
             contigs_recover, clusters, membership, cluster_reps,
-            tax_df, ani_df, depth_df, absent_set,
+            tax_df, ani_df, depth_df, absent_set, thresholds,
         )
         cluster_reps = {
             cid: representative(members, records, depth_df)
