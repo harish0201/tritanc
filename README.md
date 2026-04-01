@@ -332,8 +332,8 @@ flowchart TD
     --> F["Tier 3 — Recovery\nANI to cluster centroids + lineage-aware taxonomy"]
     --> G["Still unassigned contigs"]
     --> H["Tier 4 — Coverage-only recovery\nCoverage + TNF correlation to centroids"]
-    --> J["optional Checkm2 bin QC on thresholded bins"]
-    --> K["optional dRep based dereplication"]
-    --> I["Unassigned contigs → unassigned_contigs.fasta"]
+    H --> J["optional Checkm2 bin QC on thresholded bins"]
+    J --> K["optional dRep based dereplication"]
+    H --> I["Unassigned contigs → unassigned_contigs.fasta"]
     
 ```
