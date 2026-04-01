@@ -337,3 +337,13 @@ flowchart TD
     H --> I["Unassigned contigs → unassigned_contigs.fasta"]
     
 ```
+
+---
+
+#### Other thoughts
+
+- Was thinking about calling it **STRATA** based on geological layering which is a perfect metaphor for hierarchical tiered binning (Tiers 1–5), and it's visually distinctive. I might at a later date :)
+- Haven't really benchmarked with other binners, but my belief is that it might be competitive
+- Various hyperparameters might make it difficult to get the thing running like you want it right away, but as with any other tool, tuning is sort of needed
+
+
