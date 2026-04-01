@@ -73,13 +73,13 @@ The pipeline proceeds through the following steps:
 
 1. **Taxonomy assignment** - Runs MMseqs2 Taxonomy against a reference database (e.g., GTDB), or accepts a pre-computed taxonomy file (MMseqs2 or Taxometer format)
 2. **ANI calculation** - Runs `skani triangle` (all-vs-all) to compute pairwise ANI between contigs
-3. **Protein similarity** - Calls ORFs with pyrodigal then runs MMseqs2 all-vs-all protein search to produce contig-level protein similarity scores _(new in v10)_
-4. **TNF computation** - Computes canonical RC-collapsed tetranucleotide frequencies for all contigs ≥ 1,000 bp _(new in v10)_
+3. **Protein similarity** - Calls ORFs with pyrodigal then runs MMseqs2 all-vs-all protein search to produce contig-level protein similarity scores 
+4. **TNF computation** - Computes canonical RC-collapsed tetranucleotide frequencies for all contigs ≥ 1,000 bp
 5. **Depth profiling** - Runs `jgi_summarize_bam_contig_depths` on BAM files to build a per-sample coverage matrix
 6. **Tier 1 (main clustering)** - Clusters long contigs (≥ 5,000 bp) assigned at genus/species level using a multimodal graph (ANI + protein + taxonomy edges) with hybrid ANI/coverage/TNF gating; Leiden community detection
 7. **Tier 2 (secondary clustering)** - Second-pass multimodal clustering for above-genus assigned contigs (order/family/class/phylum)
 8. **Tier 3 (recovery)** - Assigns short and unclassified contigs to existing clusters via ANI hits to cluster centroids and/or shared lineage taxonomy
-9. **Tier 4 (coverage-only recovery)** - Places remaining unassigned contigs using coverage + TNF correlation against cluster centroids, without requiring ANI evidence _(new in v10)_
+9. **Tier 4 (coverage-only recovery)** - Places remaining unassigned contigs using coverage + TNF correlation against cluster centroids, without requiring ANI evidence 
 10. **Quality assessment** - Runs CheckM2 for completeness/contamination estimates (bins ≥ `--min-checkm2-bp`). I need to combine the quality assessment summary to the clustering summary
 11. **Dereplication** - Runs dRep at 95% ANI to produce a non-redundant bin set
 12. **Checkpointing** - Saves intermediate results as Parquet/JSON files to allow resuming interrupted runs
@@ -109,8 +109,8 @@ pip install numpy pandas networkx biopython scipy statsmodels pyarrow igraph lei
 | `scipy` | ≥1.9 | Spearman correlation |
 | `statsmodels` | ≥0.13 | BH-FDR multiple testing correction |
 | `pyarrow` | ≥10.0 | Parquet checkpointing |
-| `igraph` | ≥0.10 | Fast graph backend for Leiden _(new in v10)_ |
-| `leidenalg` | ≥0.10 | Leiden community detection _(new in v10)_ |
+| `igraph` | ≥0.10 | Fast graph backend for Leiden |
+| `leidenalg` | ≥0.10 | Leiden community detection |
 
 ### External Tools
 
@@ -124,7 +124,7 @@ mamba install -c bioconda mmseqs2 skani metabat2 samtools checkm2 drep vamb pyro
 |---|---|---|
 | `mmseqs` | `--taxonomy` not provided, or protein similarity step | [MMseqs2](https://github.com/soedinglab/MMseqs2) |
 | `skani` | `--ani` not provided | [skani](https://github.com/bluenote-1577/skani) |
-| `pyrodigal` | `--prot-sim` not provided and `--skip-prot-sim` not set | [pyrodigal](https://github.com/althonos/pyrodigal) _(new in v10)_ |
+| `pyrodigal` | `--prot-sim` not provided and `--skip-prot-sim` not set | [pyrodigal](https://github.com/althonos/pyrodigal) |
 | `jgi_summarize_bam_contig_depths` | `--depth` not provided | Part of MetaBAT2 |
 | `samtools` | `--depth` not provided | [HTSlib](https://www.htslib.org) |
 | `checkm2` | `--skip-checkm2` not set | [CheckM2](https://github.com/chklovski/CheckM2) |
