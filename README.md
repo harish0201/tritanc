@@ -126,6 +126,7 @@ mamba install -c bioconda mmseqs2 skani metabat2 samtools checkm2 drep vamb pyro
 | `skani` | `--ani` not provided | [skani](https://github.com/bluenote-1577/skani) |
 | `pyrodigal` | `--prot-sim` not provided and `--skip-prot-sim` not set | [pyrodigal](https://github.com/althonos/pyrodigal) |
 | `jgi_summarize_bam_contig_depths` | `--depth` not provided | Part of MetaBAT2 |
+| `taxometer` | `alternate to mmseqs taxonomy` | Part of VAMB - https://github.com/RasmussenLab/vamb |
 | `samtools` | `--depth` not provided | [HTSlib](https://www.htslib.org) |
 | `checkm2` | `--skip-checkm2` not set | [CheckM2](https://github.com/chklovski/CheckM2) |
 | `dRep` | `--skip-drep` not set | [dRep](https://github.com/MrOlm/drep) |
@@ -209,7 +210,7 @@ Supplying these pre-computed files skips the corresponding pipeline step:
 | `--bams` | `--depth` is not supplied |
 | `--mmseqs-db` | `--taxonomy` is not supplied |
 
-### Tunable Parameters
+### Examples for Tunable Parameters
 
 | Argument | Default | Description |
 |---|---|---|
@@ -219,7 +220,7 @@ Supplying these pre-computed files skips the corresponding pipeline step:
 | `--cov-threshold` | _adaptive_ | Spearman r threshold; overrides all tiers |
 | `--min-af` | `0.0` | Min skani alignment fraction (0 = disabled) |
 | `--coverage-as-tiebreaker` | off | Disable hard coverage gate globally |
-| `--tnf-gate-main` | `0.85` | Min TNF cosine similarity for hybrid gating in Tiers 1/2 |
+| `--tnf-gate-main` | `0.93` | Min TNF cosine similarity for hybrid gating in Tiers 1/2 |
 | `--min-score` | `0.0` | Taxometer min per-level confidence score (0–1) |
 | `--taxonomy-format` | `mmseqs2` | Taxonomy file format: `mmseqs2` or `taxometer` |
 | `--min-prot-sim` | `50.0` | Min protein identity (%) to retain a hit |
@@ -228,11 +229,12 @@ Supplying these pre-computed files skips the corresponding pipeline step:
 
 | Argument | Default | Description |
 |---|---|---|
-| `--leiden-res-main` | `1.3` | Leiden resolution for Tier 1 (main clustering) |
-| `--leiden-res-secondary` | `0.8` | Leiden resolution for Tier 2 (secondary clustering) |
-| `--leiden-res-t4` | `0.8` | Leiden resolution for Tier 4 (coverage-only recovery) |
+| `--leiden-res-main` | `3.5` | Leiden resolution for Tier 1 (main clustering) |
+| `--leiden-res-secondary` | `2.0` | Leiden resolution for Tier 2 (secondary clustering) |
+| `--leiden-res-t4` | `1.5` | Leiden resolution for Tier 4 (coverage-only recovery) |
 
-Prefer main resolution as 3.5, secondary as 2.0, tier 4 recovery as 1.5 if the bins formed are too huge for splitting
+Change the resolutions as needed for clustering. Higher resolutions lead to finer splits, 
+lower resolutions allow coarser clusters.
 
 ### Recovery
 
@@ -250,7 +252,7 @@ Prefer main resolution as 3.5, secondary as 2.0, tier 4 recovery as 1.5 if the b
 | `--skip-drep` | Skip dRep dereplication |
 | `--skip-prot-sim` | Skip protein similarity step entirely |
 | `--checkm2-db` | Path to CheckM2 diamond DB (or set `CHECKM2DB` env variable) |
-| `--min-checkm2-bp` | Minimum total bin size (bp) for CheckM2 input list (default: `200000`) |
+| `--min-checkm2-bp` | Minimum total bin size (bp) for CheckM2 input list (default: `100000`) |
 
 ### Checkpointing
 
@@ -280,8 +282,7 @@ outdir/
 ├── cluster_summary.tsv             # Per-contig assignments + taxonomy + CheckM2 quality
 ├── checkm2_bin_list.txt            # Input list for CheckM2
 ├── checkm2/                        # CheckM2 results (if run)
-├── drep/                           # dRep dereplication results (if run)
-└── final_bins/                     # Symlinks to dereplicated high + medium quality bins
+└── drep/                           # dRep dereplication results (if run)
 ```
 
 ---
@@ -304,9 +305,6 @@ outdir/
 | `rep_name` | Taxon name of the cluster representative |
 | `rep_rank` | Taxonomic rank of the cluster representative |
 | `rep_lineage` | Full lineage of the cluster representative |
-| `checkm2_completeness` | CheckM2 completeness (%) |
-| `checkm2_contamination` | CheckM2 contamination (%) |
-| `checkm2_quality` | `high`, `medium`, `low`, or `not_assessed` |
 
 ---
 
