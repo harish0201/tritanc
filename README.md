@@ -92,6 +92,8 @@ The pipeline proceeds through the following steps:
 
 Python **3.10+** is required.
 
+Package version suggestions can be seen below, or better yet, look at the pyproject.toml, and uv.lock.
+
 ### Python Packages
 
 Replace pip with mamba/conda as you wish. I recommend creating a new environment for this.
@@ -138,7 +140,7 @@ mamba install -c bioconda mmseqs2 skani metabat2 samtools checkm2 drep vamb pyro
 ### Fully Automatic (minimum inputs)
 
 ```bash
-python tritanc_v10.py \
+python tritanc.py \
   --fasta assembly.fasta \
   --bams sample1.bam sample2.bam sample3.bam \
   --mmseqs-db /path/to/GTDB \
@@ -148,7 +150,7 @@ python tritanc_v10.py \
 ### Skip Individual Steps with Pre-computed Files
 
 ```bash
-python tritanc_v10.py \
+python tritanc.py \
   --fasta assembly.fasta \
   --taxonomy saliva_tax.tsv \
   --taxonomy-format taxometer \
@@ -161,7 +163,7 @@ python tritanc_v10.py \
 ### Skip Protein Similarity (faster, slightly lower recovery)
 
 ```bash
-python tritanc_v10.py \
+python tritanc.py \
   --fasta assembly.fasta \
   --taxonomy saliva_tax.tsv \
   --ani skani.tsv \
@@ -173,7 +175,7 @@ python tritanc_v10.py \
 ### Low-Coverage Datasets (disable hard coverage gate)
 
 ```bash
-python tritanc_v10.py \
+python tritanc.py \
   --fasta assembly.fasta \
   --bams sample*.bam \
   --mmseqs-db /path/to/GTDB \
@@ -344,6 +346,6 @@ flowchart TD
 
 - Was thinking about calling it **STRATA** based on geological layering which is a perfect metaphor for hierarchical tiered binning (Tiers 1–5), and it's visually distinctive. I might at a later date :)
 - Haven't really benchmarked with other binners, but my belief is that it might be competitive
-- Various hyperparameters might make it difficult to get the thing running like you want it right away, but as with any other tool, tuning is sort of needed
+- Various hyperparameters might make it difficult to get the thing running like you want it right away, but as with any other tool, tuning is sort of needed. Mess with the resolutions, that would be the best place to begin. The tool is checkpointed, so as long as you have the output directory, you should be able to resume
 
 
